@@ -49,16 +49,18 @@ check_device2_registered()
 - **Critical Logic**: First checks for "0 registered reservation key" pattern
 - **Avoids False Positives**: Generation numbers in output could match expected keys
 - **Multi-path Handling**: Same key appears multiple times (once per path) - only need one match
+- **Pure Functions**: Only return status, do not modify state variables
 
-#### Reservation Status Checking
+#### State Verification
 ```bash
-check_reservation_status()
+verify_state()
 ```
 
 **Implementation Details:**
-- Uses `mpathpersist -ir` to read reservation status
-- Parses "there is NO reservation held" vs "Key = 0x..." patterns
-- Maps reservation key to device ownership (device1, device2, or unknown)
+- Verifies actual device state matches tracked state variables
+- **Device1 Registration**: Only checks if `DEVICE1_KEY != "0x0"` (trusts that 0x0 never appears in key lists)
+- **Reservation Status**: Always validates reservation holder matches `RESERVATION_HOLDER`
+- **Fail Fast**: Exits with error if verification fails, indicating command or state tracking bugs
 
 ## Device Verification
 
@@ -90,12 +92,12 @@ ssh "$HOST" "multipathd show maps raw format \"%n %w\" | grep $DEVICE2 | awk '{p
 - `REGISTER_AND_IGNORE` - Register new key for device1 (ignore existing reservations)
 
 #### When Device1 IS Registered (`DEVICE1_KEY != "0x0"`)
-**All Commands Valid:**
+**Most Commands Valid:**
 - `REGISTER` (2 variants):
   - Register new key (increment `DEVICE1_KEY`)
   - Unregister (set `DEVICE1_KEY="0x0"`, auto-releases reservation)
 - `REGISTER_AND_IGNORE` (2 variants): Same as REGISTER
-- `RESERVE` - Create type 5 reservation with device1's key
+- `RESERVE` - Create type 5 reservation with device1's key (**only if no reservation exists or device1 holds it**)
 - `RELEASE` - Release type 5 reservation (valid even if not holding reservation)
 - `CLEAR` - Clear all registrations and reservations
 - `PREEMPT` - Device1 preempts device2's registration/reservation
@@ -114,10 +116,7 @@ ssh "$HOST" "multipathd show maps raw format \"%n %w\" | grep $DEVICE2 | awk '{p
 
 **REGISTER Command:**
 ```bash
-# New registration
-mpathpersist --out --register --param-sark="$new_key" /dev/mapper/"$DEVICE1"
-
-# Update existing registration
+# New registration or update existing registration (simplified - always specify --param-rk)
 mpathpersist --out --register --param-rk="$DEVICE1_KEY" --param-sark="$new_key" /dev/mapper/"$DEVICE1"
 
 # Unregister
@@ -126,8 +125,11 @@ mpathpersist --out --register --param-rk="$DEVICE1_KEY" --param-sark=0x0 /dev/ma
 
 **REGISTER_AND_IGNORE Command:**
 ```bash
-# Similar to REGISTER but uses --register-ignore flag
-mpathpersist --out --register-ignore --param-rk="$DEVICE1_KEY" --param-sark="$new_key" /dev/mapper/"$DEVICE1"
+# New registration (no --param-rk specified - ignores existing reservations)
+mpathpersist --out --register-ignore --param-sark="$new_key" /dev/mapper/"$DEVICE1"
+
+# Unregister
+mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1"
 ```
 
 **RESERVE/RELEASE Commands:**
@@ -158,13 +160,13 @@ ssh "$HOST" "mpathpersist --out --preempt --param-rk=$DEVICE2_KEY --param-sark=$
 #### PREEMPT Test Scenarios
 
 **Device1 Preempts Device2:**
-1. Register device2 via SSH with key `0x1`
-2. Randomly decide whether device2 grabs reservation (50% probability)
+1. Register device2 via SSH with key `0x1` (using `--register-ignore` for reliability)
+2. Randomly decide whether device2 grabs reservation (only if no reservation exists)
 3. Device1 executes preempt command
 4. Device2 becomes unregistered, device1 holds reservation
 
 **Device2 Preempts Device1:**
-1. Register device2 via SSH with key `0x1`
+1. Register device2 via SSH with key `0x1` (using `--register-ignore` for reliability)
 2. Device2 executes preempt command via SSH
 3. Device1 becomes unregistered, device2 holds reservation
 
@@ -197,12 +199,22 @@ perform_io_test() {
     # Create random test data
     dd if=/dev/urandom of="$temp_data" bs=4096 count=1
 
-    # Perform I/O for specified duration
+    # Perform I/O for specified duration with early exit optimization
     while [[ $(date +%s) -lt $end_time ]]; do
-        dd if="$temp_data" of="/dev/mapper/$DEVICE1" bs=4096 count=1 oflag=direct
+        if dd if="$temp_data" of="/dev/mapper/$DEVICE1" bs=4096 count=1 oflag=direct; then
+            any_io_succeeded=true
+            # Exit immediately if I/O should NOT succeed
+            if [[ "$should_succeed" == "should_not_" ]]; then break; fi
+        else
+            any_io_failed=true
+            # Exit immediately if I/O should succeed
+            if [[ "$should_succeed" == "should_" ]]; then break; fi
+        fi
     done
 
     # Validate result matches expectation
+    # - When should succeed: fail if ANY I/O failed
+    # - When should not succeed: fail if ANY I/O succeeded
 }
 ```
 
@@ -233,32 +245,36 @@ wait "$MULTIPATH_TEST_PID" 2>/dev/null || true
 **Triggered by:** Script exit, interrupt signals (INT, TERM)
 **Actions:**
 1. Kill background multipath test process
-2. Clear all registrations from both devices
+2. Clear all registrations from storage (optimized - only one clear needed)
 3. Reset all state variables
 
 ### Error Recovery
 - All mpathpersist commands include error checking
 - SSH failures are handled gracefully
-- State verification after each command ensures consistency
+- State verification after each command ensures consistency and fails fast
 - Robust parsing handles unexpected output formats
+- Startup verification ensures clean initial state
 
 ### Cleanup Implementation
 ```bash
-cleanup() {
-    # Stop background processes
-    kill "$MULTIPATH_TEST_PID" 2>/dev/null || true
-
-    # Clear registrations from both devices
+clear_all_registrations() {
+    # Try device1 first, fallback to device2 if needed
+    # Since --clear removes ALL registrations, only one command needed
     if check_device1_registered; then
         mpathpersist --out --clear --param-rk="$DEVICE1_KEY" /dev/mapper/"$DEVICE1" || true
-    fi
-
-    if check_device2_registered; then
+    elif check_device2_registered; then
         ssh "$HOST" "mpathpersist --out --clear --param-rk=$DEVICE2_KEY /dev/mapper/$DEVICE2" || true
     fi
-}
 
-trap cleanup EXIT INT TERM
+    # With verification for startup (ensures clean state)
+    if [[ "$verify_clear" == "true" ]]; then
+        # Verify no registrations remain
+        output=$(mpathpersist -ik /dev/mapper/"$DEVICE1")
+        if ! echo "$output" | grep -q "0 registered reservation key"; then
+            exit 1  # Fail if cleanup verification fails
+        fi
+    fi
+}
 ```
 
 ## Test Execution Flow
@@ -269,19 +285,18 @@ trap cleanup EXIT INT TERM
 3. Verify required commands exist (`mpathpersist`, `multipath`, `multipathd`, `ssh`)
 4. Verify `multipath-test.sh` exists and is executable
 5. Compare device WWIDs to ensure same underlying storage
-6. Clear any existing registrations on both devices
+6. Clear any existing registrations and verify cleanup succeeded
 7. Start background multipath test process
 
 ### Main Test Loop
 ```
 Loop forever:
-    1. Update current state (read device registration and reservation status)
-    2. Determine valid commands based on current state
-    3. Randomly select and execute one valid command
-    4. Verify state changes match expected results
-    5. Determine expected I/O behavior based on new state
-    6. Perform 5-second I/O test and validate results
-    7. Log iteration completion and continue
+    1. Determine valid commands based on current tracked state
+    2. Randomly select and execute one valid command
+    3. Verify actual device state matches tracked state (fail fast if mismatch)
+    4. Determine expected I/O behavior based on verified state
+    5. Perform 5-second I/O test and validate results (early exit optimization)
+    6. Log iteration completion and continue
 ```
 
 ### Termination

@@ -92,7 +92,6 @@ check_device1_registered() {
 
     # First check if no keys are registered at all
     if echo "$output" | grep -q "0 registered reservation key"; then
-        DEVICE1_KEY="0x0"
         return 1  # Not registered
     fi
 
@@ -100,7 +99,6 @@ check_device1_registered() {
     if echo "$output" | grep -q "$DEVICE1_KEY"; then
         return 0  # Registered with our expected key
     else
-        DEVICE1_KEY="0x0"  # Our key not found
         return 1  # Not registered
     fi
 }
@@ -123,33 +121,6 @@ check_device2_registered() {
     fi
 }
 
-# Function to check current reservation status
-check_reservation_status() {
-    local output
-    output=$(mpathpersist -ir /dev/mapper/"$DEVICE1" 2>/dev/null)
-
-    # Check if no reservation is held
-    if echo "$output" | grep -q "there is NO reservation held"; then
-        RESERVATION_HOLDER=""
-        return 1  # No reservation
-    fi
-
-    # Reservation exists, extract the key
-    local reservation_key
-    reservation_key=$(echo "$output" | grep "Key = " | sed 's/.*Key = \(0x[0-9a-fA-F]*\).*/\1/')
-
-    # Determine who holds the reservation
-    if [[ "$reservation_key" == "$DEVICE1_KEY" ]]; then
-        RESERVATION_HOLDER="device1"
-        return 0
-    elif [[ "$reservation_key" == "$DEVICE2_KEY" ]]; then
-        RESERVATION_HOLDER="device2"
-        return 0
-    else
-        RESERVATION_HOLDER="unknown"  # Unexpected key holder
-        return 2
-    fi
-}
 
 # Function to increment device1 key
 increment_device1_key() {
@@ -158,33 +129,92 @@ increment_device1_key() {
     DEVICE1_NEXT_KEY=$(printf "0x%x" $decimal_key)
 }
 
-# Function to update state by reading current device status
-update_state() {
-    check_device1_registered || true
-    check_reservation_status || true
-    log_info "Current state: device1_key=$DEVICE1_KEY, reservation_holder=$RESERVATION_HOLDER"
+# Function to verify state matches actual device status
+verify_state() {
+    local output
+
+    # Check device1 registration status (only if we expect it to be registered)
+    if [[ "$DEVICE1_KEY" != "0x0" ]]; then
+        output=$(mpathpersist -ik /dev/mapper/"$DEVICE1" 2>/dev/null)
+        if echo "$output" | grep -q "0 registered reservation key" || ! echo "$output" | grep -q "$DEVICE1_KEY"; then
+            log_error "State verification failed: device1 should be registered with key $DEVICE1_KEY but not found"
+            log_error "Registration output: $output"
+            exit 1
+        fi
+    fi
+
+    # Check reservation status
+    output=$(mpathpersist -ir /dev/mapper/"$DEVICE1" 2>/dev/null)
+
+    if [[ "$RESERVATION_HOLDER" == "" ]]; then
+        # No reservation should exist
+        if ! echo "$output" | grep -q "there is NO reservation held"; then
+            log_error "State verification failed: no reservation should exist but reservation found"
+            log_error "Reservation output: $output"
+            exit 1
+        fi
+    else
+        # Reservation should exist with correct key
+        if echo "$output" | grep -q "there is NO reservation held"; then
+            log_error "State verification failed: reservation should exist for $RESERVATION_HOLDER but none found"
+            log_error "Reservation output: $output"
+            exit 1
+        else
+            local reservation_key
+            reservation_key=$(echo "$output" | grep "Key = " | sed 's/.*Key = \(0x[0-9a-fA-F]*\).*/\1/')
+            local expected_key
+            if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
+                expected_key="$DEVICE1_KEY"
+            elif [[ "$RESERVATION_HOLDER" == "device2" ]]; then
+                expected_key="$DEVICE2_KEY"
+            else
+                log_error "State verification failed: unknown reservation holder $RESERVATION_HOLDER"
+                exit 1
+            fi
+
+            if [[ "$reservation_key" != "$expected_key" ]]; then
+                log_error "State verification failed: reservation key $reservation_key does not match expected $expected_key for $RESERVATION_HOLDER"
+                log_error "Reservation output: $output"
+                exit 1
+            fi
+        fi
+    fi
+
+    log_info "State verified: device1_key=$DEVICE1_KEY, reservation_holder=$RESERVATION_HOLDER"
 }
 
 # Function to clear all registrations and reservations
 clear_all_registrations() {
+    local verify_clear=${1:-false}  # Optional parameter to verify clearing succeeded
+
     log_info "Clearing all registrations and reservations..."
 
-    # Clear from device1 if registered
+    # Try to clear from device1 first (if it has a key)
     if check_device1_registered; then
         mpathpersist --out --clear --param-rk="$DEVICE1_KEY" /dev/mapper/"$DEVICE1" || true
-    fi
-
-    # Clear from device2 if registered
-    if check_device2_registered; then
+    elif check_device2_registered; then
+        # If device1 not registered but device2 is, clear from device2
         ssh "$HOST" "mpathpersist --out --clear --param-rk=$DEVICE2_KEY /dev/mapper/$DEVICE2" || true
     fi
 
-    # Reset state
+    # Reset state - clear command removes ALL registrations and reservations
     DEVICE1_KEY="0x0"
     DEVICE1_NEXT_KEY="0x2"
     RESERVATION_HOLDER=""
 
-    log_success "All registrations cleared"
+    # Verify clearing succeeded if requested (for startup)
+    if [[ "$verify_clear" == "true" ]]; then
+        local output
+        output=$(mpathpersist -ik /dev/mapper/"$DEVICE1" 2>/dev/null)
+        if ! echo "$output" | grep -q "0 registered reservation key"; then
+            log_error "Failed to clear all registrations - some keys still registered"
+            log_error "Current registration status: $output"
+            exit 1
+        fi
+        log_success "Verified all registrations cleared"
+    else
+        log_success "All registrations cleared"
+    fi
 }
 
 # Function to perform I/O test
@@ -193,19 +223,29 @@ perform_io_test() {
     local test_file="/dev/mapper/$DEVICE1"
     local temp_data="/tmp/mpath_pr_test_$$"
 
-    log_info "Performing I/O test (should ${should_succeed}succeed) for $IO_TEST_DURATION seconds..."
+    log_info "Performing I/O test (${should_succeed}succeed) for $IO_TEST_DURATION seconds..."
 
     # Create test data
     dd if=/dev/urandom of="$temp_data" bs=4096 count=1 2>/dev/null
 
     local start_time=$(date +%s)
     local end_time=$((start_time + IO_TEST_DURATION))
-    local io_success=true
+    local any_io_succeeded=false
+    local any_io_failed=false
 
     while [[ $(date +%s) -lt $end_time ]]; do
-        if ! dd if="$temp_data" of="$test_file" bs=4096 count=1 oflag=direct 2>/dev/null; then
-            io_success=false
-            break
+        if dd if="$temp_data" of="$test_file" bs=4096 count=1 oflag=direct 2>/dev/null; then
+            any_io_succeeded=true
+            # If I/O should NOT succeed, fail immediately on first success
+            if [[ "$should_succeed" == "should_not_" ]]; then
+                break
+            fi
+        else
+            any_io_failed=true
+            # If I/O should succeed, fail immediately on first failure
+            if [[ "$should_succeed" == "should_" ]]; then
+                break
+            fi
         fi
         sleep 0.1
     done
@@ -213,14 +253,14 @@ perform_io_test() {
     rm -f "$temp_data"
 
     if [[ "$should_succeed" == "should_" ]]; then
-        if [[ "$io_success" == "true" ]]; then
+        if [[ "$any_io_failed" == "false" ]]; then
             log_success "I/O test passed: I/O succeeded as expected"
         else
             log_error "I/O test failed: I/O failed but should have succeeded"
             return 1
         fi
     else
-        if [[ "$io_success" == "false" ]]; then
+        if [[ "$any_io_succeeded" == "false" ]]; then
             log_success "I/O test passed: I/O failed as expected"
         else
             log_error "I/O test failed: I/O succeeded but should have failed"
@@ -256,11 +296,7 @@ execute_register() {
     else
         local new_key="$DEVICE1_NEXT_KEY"
         log_info "Executing REGISTER with new key (key=$DEVICE1_KEY -> $new_key)"
-        if [[ "$DEVICE1_KEY" == "0x0" ]]; then
-            mpathpersist --out --register --param-sark="$new_key" /dev/mapper/"$DEVICE1"
-        else
-            mpathpersist --out --register --param-rk="$DEVICE1_KEY" --param-sark="$new_key" /dev/mapper/"$DEVICE1"
-        fi
+        mpathpersist --out --register --param-rk="$DEVICE1_KEY" --param-sark="$new_key" /dev/mapper/"$DEVICE1"
         DEVICE1_KEY="$new_key"
         increment_device1_key
     fi
@@ -272,13 +308,13 @@ execute_register_and_ignore() {
 
     if [[ "$variant" == "unregister" ]]; then
         log_info "Executing REGISTER_AND_IGNORE to unregister device1 (key=$DEVICE1_KEY -> 0x0)"
-        mpathpersist --out --register-ignore --param-rk="$DEVICE1_KEY" --param-sark=0x0 /dev/mapper/"$DEVICE1"
+        mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1"
         DEVICE1_KEY="0x0"
         RESERVATION_HOLDER=""  # Unregistering releases reservation
     else
         local new_key="$DEVICE1_NEXT_KEY"
         log_info "Executing REGISTER_AND_IGNORE with new key (key=$DEVICE1_KEY -> $new_key)"
-        mpathpersist --out --register-ignore --param-rk="$DEVICE1_KEY" --param-sark="$new_key" /dev/mapper/"$DEVICE1"
+        mpathpersist --out --register-ignore --param-sark="$new_key" /dev/mapper/"$DEVICE1"
         DEVICE1_KEY="$new_key"
         increment_device1_key
     fi
@@ -312,13 +348,12 @@ execute_preempt() {
 
     # Register device2
     log_info "Registering device2 with key $DEVICE2_KEY"
-    ssh "$HOST" "mpathpersist --out --register --param-sark=$DEVICE2_KEY /dev/mapper/$DEVICE2"
+    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=$DEVICE2_KEY /dev/mapper/$DEVICE2"
 
-    # Randomly decide whether to grab reservation on device2
-    if [[ $((RANDOM % 2)) -eq 0 ]]; then
+    # Randomly decide whether to grab reservation on device2 (only if no reservation exists)
+    if [[ "$RESERVATION_HOLDER" == "" && $((RANDOM % 2)) -eq 0 ]]; then
         log_info "Device2 grabbing reservation"
         ssh "$HOST" "mpathpersist --out --reserve --param-rk=$DEVICE2_KEY --prout-type=5 /dev/mapper/$DEVICE2"
-        RESERVATION_HOLDER="device2"
     fi
 
     # Execute preempt from device1
@@ -333,7 +368,7 @@ execute_preempt_by_device2() {
 
     # Register device2
     log_info "Registering device2 with key $DEVICE2_KEY"
-    ssh "$HOST" "mpathpersist --out --register --param-sark=$DEVICE2_KEY /dev/mapper/$DEVICE2"
+    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=$DEVICE2_KEY /dev/mapper/$DEVICE2"
 
     # Execute preempt from device2
     log_info "Device2 preempting device1 (key=$DEVICE2_KEY preempts $DEVICE1_KEY)"
@@ -350,9 +385,14 @@ get_valid_commands() {
         # Device1 not registered - only register commands valid
         commands+=("REGISTER" "REGISTER_AND_IGNORE")
     else
-        # Device1 registered - all commands valid
+        # Device1 registered - most commands valid
         commands+=("REGISTER_NEW" "REGISTER_UNREGISTER" "REGISTER_AND_IGNORE_NEW" "REGISTER_AND_IGNORE_UNREGISTER")
-        commands+=("RESERVE" "RELEASE" "CLEAR" "PREEMPT" "PREEMPT_BY_DEVICE2")
+        commands+=("RELEASE" "CLEAR" "PREEMPT" "PREEMPT_BY_DEVICE2")
+
+        # RESERVE only valid if no reservation or device1 holds it
+        if [[ "$RESERVATION_HOLDER" == "" || "$RESERVATION_HOLDER" == "device1" ]]; then
+            commands+=("RESERVE")
+        fi
     fi
 
     echo "${commands[@]}"
@@ -443,8 +483,8 @@ main() {
     # Verify devices point to same storage
     verify_device_wwids
 
-    # Clear any existing registrations
-    clear_all_registrations
+    # Clear any existing registrations and verify success
+    clear_all_registrations true
 
     # Start background multipath test
     start_background_test
@@ -455,14 +495,11 @@ main() {
         echo
         log_info "=== Test iteration $iteration ==="
 
-        # Update current state
-        update_state
-
         # Execute random command
         execute_random_command
 
         # Verify state after command
-        update_state
+        verify_state
 
         # Perform I/O test
         local io_expectation
