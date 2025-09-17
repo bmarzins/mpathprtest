@@ -1,0 +1,32 @@
+mpathprtest is a test for the device-mapper multipath mpathpersist program
+that looks like this:
+
+mpath_pr_test <device1> <host> <device2>
+
+where <device1> is an already existing multipath device, <host> is a host
+with ssh set up so that the test can log in without a password and <device2>
+is a second multipath device with the same underlying storage as
+<device1>. The <host> and <device2> will only be use as a second device
+for testing the PREEMPT Persistent Reservation command, and that IO to
+an unregistered device fails when there is a Persistent
+Reservation. Otherwise, all testing will use <device1> on the current machine.
+
+
+The test needs to:
+1. Verify that the two devices point to the same storage
+2. Clear any registered keys currently registered on either device
+3. Start a separate process that fails and restores paths on <device1>
+   making sure that there is at least one usable path at all times. This
+   can be done by running the script "multipath_test.sh <device1>" that is in
+   the same directory as the mpath_pr_test program itself.
+
+4. Track the registered key and reservation status of <device1>, while
+   randomly issuing valid Persistent Reservation commands, and verifying
+   that the command succeeds and the registered key and reservation status
+   correctly updated. After each command the program must write direct IO
+   to <device1> for 5 seconds, or until the IO fails. It must make sure
+   that the IO succeeds when the device has a registered key, and fails
+   when the device doesn't have a registered key, and there is an
+   existing persistent reservation
+
+
