@@ -5,11 +5,10 @@ mpath_pr_test <device1> <host> <device2>
 
 where <device1> is an already existing multipath device, <host> is a host
 with ssh set up so that the test can log in without a password and <device2>
-is a second multipath device with the same underlying storage as
-<device1>. The <host> and <device2> will only be use as a second device
-for testing the PREEMPT Persistent Reservation command, and that IO to
-an unregistered device fails when there is a Persistent
-Reservation. Otherwise, all testing will use <device1> on the current machine.
+is a second multipath device with the same underlying storage as <device1>.
+The <host> and <device2> will only be use as a second device for testing the
+PREEMPT Persistent Reservation command. Otherwise, all testing will use
+<device1> on the current machine.
 
 
 The test needs to:
@@ -23,10 +22,10 @@ The test needs to:
 4. Track the registered key and reservation status of <device1>, while
    randomly issuing valid Persistent Reservation commands, and verifying
    that the command succeeds and the registered key and reservation status
-   correctly updated. After each command the program must write direct IO
-   to <device1> for 5 seconds, or until the IO fails. It must make sure
-   that the IO succeeds when the device has a registered key, and fails
-   when the device doesn't have a registered key, and there is an
-   existing persistent reservation
+   are correctly updated. After each command the program must attempt to
+   write direct IO to <device1> for a short time. It must make sure that all
+   IO succeeds when the device has a registered key, and fails when the
+   device doesn't have a registered key and there is an existing persistent
+   reservation
 
 

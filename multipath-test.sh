@@ -183,7 +183,7 @@ main() {
     MULTIPATH_DEVICE="$device"
     
     # Set up cleanup trap
-    trap cleanup EXIT INT TERM
+    trap cleanup EXIT
     
     # Validate device
     validate_multipath_device "$device"

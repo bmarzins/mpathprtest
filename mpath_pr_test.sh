@@ -16,11 +16,6 @@ NC='\033[0m' # No Color
 IO_TEST_DURATION=5  # seconds to run I/O test after each command
 CLEANUP_TIMEOUT=30  # seconds to wait for cleanup
 
-# Command line arguments
-DEVICE1="$1"
-HOST="$2"
-DEVICE2="$3"
-
 # State tracking variables
 DEVICE1_KEY="0x0"        # Current key for device1 (0x0 = not registered)
 DEVICE2_KEY="0x1"        # Fixed key for device2 when registered
@@ -189,13 +184,10 @@ clear_all_registrations() {
 
     log_info "Clearing all registrations and reservations..."
 
-    # Try to clear from device1 first (if it has a key)
-    if check_device1_registered; then
-        mpathpersist --out --clear --param-rk="$DEVICE1_KEY" /dev/mapper/"$DEVICE1" || true
-    elif check_device2_registered; then
-        # If device1 not registered but device2 is, clear from device2
-        ssh "$HOST" "mpathpersist --out --clear --param-rk=$DEVICE2_KEY /dev/mapper/$DEVICE2" || true
-    fi
+    # unregister device1
+    mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1" || true
+    # unregister device2
+    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/$DEVICE2" || true
 
     # Reset state - clear command removes ALL registrations and reservations
     DEVICE1_KEY="0x0"
@@ -292,7 +284,9 @@ execute_register() {
         log_info "Executing REGISTER to unregister device1 (key=$DEVICE1_KEY -> 0x0)"
         mpathpersist --out --register --param-rk="$DEVICE1_KEY" --param-sark=0x0 /dev/mapper/"$DEVICE1"
         DEVICE1_KEY="0x0"
-        RESERVATION_HOLDER=""  # Unregistering releases reservation
+        if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
+            RESERVATION_HOLDER=""  # Unregistering releases reservation
+        fi
     else
         local new_key="$DEVICE1_NEXT_KEY"
         log_info "Executing REGISTER with new key (key=$DEVICE1_KEY -> $new_key)"
@@ -310,7 +304,9 @@ execute_register_and_ignore() {
         log_info "Executing REGISTER_AND_IGNORE to unregister device1 (key=$DEVICE1_KEY -> 0x0)"
         mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1"
         DEVICE1_KEY="0x0"
-        RESERVATION_HOLDER=""  # Unregistering releases reservation
+        if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
+            RESERVATION_HOLDER=""  # Unregistering releases reservation
+        fi
     else
         local new_key="$DEVICE1_NEXT_KEY"
         log_info "Executing REGISTER_AND_IGNORE with new key (key=$DEVICE1_KEY -> $new_key)"
@@ -331,7 +327,9 @@ execute_reserve() {
 execute_release() {
     log_info "Executing RELEASE (key=$DEVICE1_KEY)"
     mpathpersist --out --release --param-rk="$DEVICE1_KEY" --prout-type=5 /dev/mapper/"$DEVICE1"
-    RESERVATION_HOLDER=""
+    if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
+        RESERVATION_HOLDER=""  # Unregistering releases reservation
+    fi
 }
 
 # Function to execute CLEAR command
@@ -354,12 +352,15 @@ execute_preempt() {
     if [[ "$RESERVATION_HOLDER" == "" && $((RANDOM % 2)) -eq 0 ]]; then
         log_info "Device2 grabbing reservation"
         ssh "$HOST" "mpathpersist --out --reserve --param-rk=$DEVICE2_KEY --prout-type=5 /dev/mapper/$DEVICE2"
+        RESERVATION_HOLDER="device2"
     fi
 
     # Execute preempt from device1
     log_info "Device1 preempting device2 (key=$DEVICE1_KEY preempts $DEVICE2_KEY)"
     mpathpersist --out --preempt --param-rk="$DEVICE1_KEY" --param-sark="$DEVICE2_KEY" --prout-type=5 /dev/mapper/"$DEVICE1"
-    RESERVATION_HOLDER="device1"
+    if [[ "$RESERVATION_HOLDER" == "device2" ]]; then
+        RESERVATION_HOLDER="device1"
+    fi
 }
 
 # Function to execute preempt by device2 (device2 preempts device1)
@@ -374,7 +375,9 @@ execute_preempt_by_device2() {
     log_info "Device2 preempting device1 (key=$DEVICE2_KEY preempts $DEVICE1_KEY)"
     ssh "$HOST" "mpathpersist --out --preempt --param-rk=$DEVICE2_KEY --param-sark=$DEVICE1_KEY --prout-type=5 /dev/mapper/$DEVICE2"
     DEVICE1_KEY="0x0"  # Device1 gets unregistered
-    RESERVATION_HOLDER="device2"
+    if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
+        RESERVATION_HOLDER="device2"
+    fi
 }
 
 # Function to get list of valid commands based on current state
@@ -522,6 +525,11 @@ if [[ $# -ne 3 ]]; then
     echo "  device2: Remote multipath device pointing to same storage"
     exit 1
 fi
+
+# Command line arguments
+DEVICE1="$1"
+HOST="$2"
+DEVICE2="$3"
 
 # Check prerequisites
 check_root
