@@ -231,7 +231,7 @@ sg_persist_with_retry --out --register-ignore --param-sark=0x0 /dev/"$DEVICE2"
 ### I/O Test Implementation
 ```bash
 perform_io_test() {
-    local should_succeed=$1  # "should_" or "should_not_"
+    local expected_result=$1  # "pass" or "fail"
 
     # Create random test data
     dd if=/dev/urandom of="$temp_data" bs=4096 count=1
@@ -240,18 +240,18 @@ perform_io_test() {
     while [[ $(date +%s) -lt $end_time ]]; do
         if dd if="$temp_data" of="/dev/mapper/$DEVICE1" bs=4096 count=1 oflag=direct; then
             any_io_succeeded=true
-            # Exit immediately if I/O should NOT succeed
-            if [[ "$should_succeed" == "should_not_" ]]; then break; fi
+            # Exit immediately if I/O should fail
+            if [[ "$expected_result" == "fail" ]]; then break; fi
         else
             any_io_failed=true
-            # Exit immediately if I/O should succeed
-            if [[ "$should_succeed" == "should_" ]]; then break; fi
+            # Exit immediately if I/O should pass
+            if [[ "$expected_result" == "pass" ]]; then break; fi
         fi
     done
 
     # Validate result matches expectation
-    # - When should succeed: fail if ANY I/O failed
-    # - When should not succeed: fail if ANY I/O succeeded
+    # - When should pass: fail if ANY I/O failed
+    # - When should fail: fail if ANY I/O succeeded
 }
 ```
 

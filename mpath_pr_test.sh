@@ -235,11 +235,11 @@ clear_all_registrations() {
 
 # Function to perform I/O test
 perform_io_test() {
-    local should_succeed=$1
+    local expected_result=$1
     local test_file="/dev/mapper/$DEVICE1"
     local temp_data="/tmp/mpath_pr_test_$$"
 
-    log_info "Performing I/O test (${should_succeed}succeed) for $IO_TEST_DURATION seconds..."
+    log_info "Performing I/O test (expected: $expected_result) for $IO_TEST_DURATION seconds..."
 
     # Create test data
     dd if=/dev/urandom of="$temp_data" bs=4096 count=1 2>/dev/null
@@ -252,14 +252,14 @@ perform_io_test() {
     while [[ $(date +%s) -lt $end_time ]]; do
         if dd if="$temp_data" of="$test_file" bs=4096 count=1 oflag=direct 2>/dev/null; then
             any_io_succeeded=true
-            # If I/O should NOT succeed, fail immediately on first success
-            if [[ "$should_succeed" == "should_not_" ]]; then
+            # If I/O should fail, fail immediately on first success
+            if [[ "$expected_result" == "fail" ]]; then
                 break
             fi
         else
             any_io_failed=true
-            # If I/O should succeed, fail immediately on first failure
-            if [[ "$should_succeed" == "should_" ]]; then
+            # If I/O should pass, fail immediately on first failure
+            if [[ "$expected_result" == "pass" ]]; then
                 break
             fi
         fi
@@ -268,7 +268,7 @@ perform_io_test() {
 
     rm -f "$temp_data"
 
-    if [[ "$should_succeed" == "should_" ]]; then
+    if [[ "$expected_result" == "pass" ]]; then
         if [[ "$any_io_failed" == "false" ]]; then
             log_success "I/O test passed: I/O succeeded as expected"
         else
@@ -286,16 +286,16 @@ perform_io_test() {
 }
 
 # Function to determine expected I/O result
-should_io_succeed() {
+get_expected_result() {
     # I/O should succeed if device1 has a registered key
     if [[ "$DEVICE1_KEY" != "0x0" ]]; then
-        echo "should_"
+        echo "pass"
     else
         # I/O should fail if device1 has no key and there's a reservation
         if [[ -n "$RESERVATION_HOLDER" ]]; then
-            echo "should_not_"
+            echo "fail"
         else
-            echo "should_"
+            echo "pass"
         fi
     fi
 }
@@ -530,7 +530,7 @@ main() {
 
         # Perform I/O test
         local io_expectation
-        io_expectation=$(should_io_succeed)
+        io_expectation=$(get_expected_result)
         perform_io_test "$io_expectation"
 
         log_success "Iteration $iteration completed successfully"
