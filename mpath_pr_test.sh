@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # mpath_pr_test - Test program for multipath persistent reservations
-# Usage: mpath_pr_test.sh <device1> <host> <device2>
+# Usage: mpath_pr_test.sh <device1> <device2>
 
 set -euo pipefail
 
@@ -50,6 +50,30 @@ check_root() {
     fi
 }
 
+# Function to run sg_persist with retry on Unit Attention (exit code 6)
+sg_persist_with_retry() {
+    local max_retries=3
+    local retry_count=0
+
+    while [[ $retry_count -lt $max_retries ]]; do
+        if sg_persist "$@"; then
+            return 0
+        else
+            local exit_code=$?
+            if [[ $exit_code -eq 6 ]]; then
+                ((retry_count++))
+                log_warning "Unit Attention occurred (attempt $retry_count/$max_retries), retrying..."
+                sleep 0.1
+            else
+                return $exit_code
+            fi
+        fi
+    done
+
+    log_error "sg_persist failed after $max_retries retries due to Unit Attention"
+    return 6
+}
+
 # Function to verify device WWIDs match
 verify_device_wwids() {
     log_info "Verifying that $DEVICE1 and $DEVICE2 point to the same storage..."
@@ -64,10 +88,10 @@ verify_device_wwids() {
         exit 1
     fi
 
-    # Get WWID of device2 via SSH
-    device2_wwid=$(ssh "$HOST" "multipathd show maps raw format \"%n %w\" | grep $DEVICE2 | awk '{print \$2}'")
+    # Get WWID of device2 using udevadm
+    device2_wwid=$(udevadm info -n "$DEVICE2" --query=property --property=ID_SERIAL --value)
     if [[ -z "$device2_wwid" ]]; then
-        log_error "Could not get WWID for $DEVICE2 on $HOST"
+        log_error "Could not get WWID for $DEVICE2"
         exit 1
     fi
 
@@ -101,10 +125,10 @@ check_device1_registered() {
 # Function to check if device2 is registered
 check_device2_registered() {
     local output
-    output=$(ssh "$HOST" "mpathpersist -ik /dev/mapper/$DEVICE2" 2>/dev/null)
+    output=$(sg_persist_with_retry -ik "$DEVICE2" 2>/dev/null)
 
     # First check if no keys are registered at all
-    if echo "$output" | grep -q "0 registered reservation key"; then
+    if echo "$output" | grep -q "there are NO registered reservation keys"; then
         return 1  # Not registered
     fi
 
@@ -187,7 +211,7 @@ clear_all_registrations() {
     # unregister device1
     mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1" || true
     # unregister device2
-    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/$DEVICE2" || true
+    sg_persist_with_retry --out --register-ignore --param-sark=0x0 "$DEVICE2" || true
 
     # Reset state - clear command removes ALL registrations and reservations
     DEVICE1_KEY="0x0"
@@ -346,12 +370,12 @@ execute_preempt() {
 
     # Register device2
     log_info "Registering device2 with key $DEVICE2_KEY"
-    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=$DEVICE2_KEY /dev/mapper/$DEVICE2"
+    sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" "$DEVICE2"
 
     # Randomly decide whether to grab reservation on device2 (only if no reservation exists)
     if [[ "$RESERVATION_HOLDER" == "" && $((RANDOM % 2)) -eq 0 ]]; then
         log_info "Device2 grabbing reservation"
-        ssh "$HOST" "mpathpersist --out --reserve --param-rk=$DEVICE2_KEY --prout-type=5 /dev/mapper/$DEVICE2"
+        sg_persist_with_retry --out --reserve --param-rk="$DEVICE2_KEY" --prout-type=5 "$DEVICE2"
         RESERVATION_HOLDER="device2"
     fi
 
@@ -369,11 +393,11 @@ execute_preempt_by_device2() {
 
     # Register device2
     log_info "Registering device2 with key $DEVICE2_KEY"
-    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=$DEVICE2_KEY /dev/mapper/$DEVICE2"
+    sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" "$DEVICE2"
 
     # Execute preempt from device2
     log_info "Device2 preempting device1 (key=$DEVICE2_KEY preempts $DEVICE1_KEY)"
-    ssh "$HOST" "mpathpersist --out --preempt --param-rk=$DEVICE2_KEY --param-sark=$DEVICE1_KEY --prout-type=5 /dev/mapper/$DEVICE2"
+    sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 "$DEVICE2"
     DEVICE1_KEY="0x0"  # Device1 gets unregistered
     if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
         RESERVATION_HOLDER="device2"
@@ -478,7 +502,7 @@ cleanup() {
 
 # Main function
 main() {
-    log_info "Starting mpath_pr_test for devices: $DEVICE1 (local) and $DEVICE2 (on $HOST)"
+    log_info "Starting mpath_pr_test for devices: $DEVICE1 (multipath) and $DEVICE2 (SCSI)"
 
     # Set up cleanup trap
     trap cleanup EXIT INT TERM
@@ -518,24 +542,22 @@ main() {
 }
 
 # Script entry point
-if [[ $# -ne 3 ]]; then
-    echo "Usage: $0 <device1> <host> <device2>"
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 <device1> <device2>"
     echo "  device1: Local multipath device (e.g., mpatha)"
-    echo "  host:    Remote host with SSH access"
-    echo "  device2: Remote multipath device pointing to same storage"
+    echo "  device2: Local SCSI device pointing to same storage (e.g., /dev/sdb)"
     exit 1
 fi
 
 # Command line arguments
 DEVICE1="$1"
-HOST="$2"
-DEVICE2="$3"
+DEVICE2="$2"
 
 # Check prerequisites
 check_root
 
 # Check if required commands are available
-for cmd in mpathpersist multipath multipathd ssh; do
+for cmd in mpathpersist multipath multipathd sg_persist udevadm; do
     if ! command -v "$cmd" &> /dev/null; then
         log_error "Required command '$cmd' not found"
         exit 1

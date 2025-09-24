@@ -2,23 +2,22 @@
 
 ## Overview
 
-The `mpath_pr_test` program is a comprehensive test suite for validating SCSI Persistent Reservations (PR) functionality on device-mapper multipath devices using the `mpathpersist` utility. The test simulates real-world scenarios including multi-host environments and path failures while systematically testing all supported PR commands.
+The `mpath_pr_test` program is a comprehensive test suite for validating SCSI Persistent Reservations (PR) functionality on device-mapper multipath devices using the `mpathpersist` and `sg_persist` utilities. The test simulates real-world scenarios including multiple device access patterns and path failures while systematically testing all supported PR commands.
 
 ## Architecture
 
 ### Program Type
 - **Implementation**: Bash shell script
-- **Rationale**: All operations are command-line tools (`mpathpersist`, `ssh`, `dd`). Bash provides natural orchestration of external commands with simpler string parsing and process management compared to C.
+- **Rationale**: All operations are command-line tools (`mpathpersist`, `sg_persist`, `dd`). Bash provides natural orchestration of external commands with simpler string parsing and process management compared to C.
 
 ### Command Line Interface
 ```bash
-mpath_pr_test.sh <device1> <host> <device2>
+mpath_pr_test.sh <device1> <device2>
 ```
 
 **Parameters:**
-- `device1`: Local multipath device name (e.g., "mpatha")
-- `host`: Remote host with passwordless SSH access configured
-- `device2`: Remote multipath device pointing to the same underlying storage as device1
+- `device1`: Multipath device name (e.g., "mpatha")
+- `device2`: SCSI device pointing to the same underlying storage as device1 (e.g., "/dev/sdb")
 
 ## State Management
 
@@ -45,11 +44,27 @@ check_device2_registered()
 ```
 
 **Implementation Details:**
-- Uses `mpathpersist -ik` to read registered keys
-- **Critical Logic**: First checks for "0 registered reservation key" pattern
+- Device1: Uses `mpathpersist -ik` to read registered keys
+- Device2: Uses `sg_persist_with_retry -ik` to read registered keys
+- **Critical Logic**:
+  - Device1: First checks for "0 registered reservation key" pattern
+  - Device2: First checks for "there are NO registered reservation keys" pattern
+- **Output Format Differences**: sg_persist vs mpathpersist have different no-keys messages
 - **Avoids False Positives**: Generation numbers in output could match expected keys
 - **Multi-path Handling**: Same key appears multiple times (once per path) - only need one match
 - **Pure Functions**: Only return status, do not modify state variables
+
+#### Device2 sg_persist Retry Logic
+```bash
+sg_persist_with_retry()
+```
+
+**Implementation Details:**
+- Wraps all `sg_persist` commands with automatic retry logic
+- **Unit Attention Handling**: Exit code 6 indicates Unit Attention condition (not an error)
+- **Retry Strategy**: Up to 3 attempts with 0.1 second delay between retries
+- **Error Propagation**: Non-6 exit codes immediately return as errors
+- **Timeout Protection**: Prevents infinite retry loops on persistent Unit Attention
 
 #### State Verification
 ```bash
@@ -67,19 +82,19 @@ verify_state()
 ### WWID Comparison
 Ensures both devices point to the same underlying storage using World Wide Identifiers:
 
-**Local Device:**
+**Multipath Device (device1):**
 ```bash
 multipathd show maps raw format "%n %w" | grep "$DEVICE1" | awk '{print $2}'
 ```
 
-**Remote Device:**
+**SCSI Device (device2):**
 ```bash
-ssh "$HOST" "multipathd show maps raw format \"%n %w\" | grep $DEVICE2 | awk '{print \$2}'"
+udevadm info -n "$DEVICE2" --query=property --property=ID_SERIAL --value
 ```
 
 **Critical Implementation Notes:**
-- Proper quote escaping for SSH commands
-- `\$2` prevents local shell expansion of `$2`
+- Uses udevadm to extract WWID from SCSI device properties
+- Both devices must have matching WWIDs to proceed
 - Program exits with error if WWIDs don't match
 
 ## Command Testing Framework
@@ -151,8 +166,20 @@ mpathpersist --out --clear --param-rk="$DEVICE1_KEY" /dev/mapper/"$DEVICE1"
 # Device1 preempts device2
 mpathpersist --out --preempt --param-rk="$DEVICE1_KEY" --param-sark="$DEVICE2_KEY" --prout-type=5 /dev/mapper/"$DEVICE1"
 
-# Device2 preempts device1 (via SSH)
-ssh "$HOST" "mpathpersist --out --preempt --param-rk=$DEVICE2_KEY --param-sark=$DEVICE1_KEY --prout-type=5 /dev/mapper/$DEVICE2"
+# Device2 preempts device1 (using sg_persist)
+sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 "$DEVICE2"
+```
+
+**Device2 Operations (using sg_persist):**
+```bash
+# Register device2
+sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" "$DEVICE2"
+
+# Reserve from device2
+sg_persist_with_retry --out --reserve --param-rk="$DEVICE2_KEY" --prout-type=5 "$DEVICE2"
+
+# Unregister device2 (cleanup)
+sg_persist_with_retry --out --register-ignore --param-sark=0x0 "$DEVICE2"
 ```
 
 #### State Tracking Precision
@@ -163,25 +190,26 @@ ssh "$HOST" "mpathpersist --out --preempt --param-rk=$DEVICE2_KEY --param-sark=$
 - **PREEMPT operations**: Only change `RESERVATION_HOLDER` if the operation actually preempted an existing reservation
 - **Prevents false state**: Avoids incorrectly clearing reservation holder when device1 wasn't actually holding it
 
-### Multi-Host Testing
+### Multi-Device Testing
 
 #### PREEMPT Test Scenarios
 
 **Device1 Preempts Device2:**
-1. Register device2 via SSH with key `0x1` (using `--register-ignore` for reliability)
+1. Register device2 using sg_persist with key `0x1` (using `--register-ignore` for reliability)
 2. Randomly decide whether device2 grabs reservation (only if no reservation exists)
 3. Device1 executes preempt command
 4. Device2 becomes unregistered, device1 holds reservation
 
 **Device2 Preempts Device1:**
-1. Register device2 via SSH with key `0x1` (using `--register-ignore` for reliability)
-2. Device2 executes preempt command via SSH
+1. Register device2 using sg_persist with key `0x1` (using `--register-ignore` for reliability)
+2. Device2 executes preempt command using sg_persist
 3. Device1 becomes unregistered, device2 holds reservation
 
-#### SSH Command Considerations
-- All remote commands properly escape quotes and variables
-- Remote command execution uses double quotes to allow variable expansion
-- Special handling for `awk` field separators (`\$2` instead of `$2`)
+#### Device Access Patterns
+- Device1 (multipath): Uses `mpathpersist` for all operations
+- Device2 (SCSI): Uses `sg_persist_with_retry` wrapper for all operations
+- Both devices point to same underlying storage with verified matching WWIDs
+- Unit Attention conditions on device2 are automatically retried
 
 ## I/O Testing Framework
 
@@ -260,7 +288,7 @@ wait "$MULTIPATH_TEST_PID" 2>/dev/null || true
 
 ### Error Recovery
 - All mpathpersist commands include error checking
-- SSH failures are handled gracefully
+- sg_persist Unit Attention conditions are automatically retried
 - State verification after each command ensures consistency and fails fast
 - Robust parsing handles unexpected output formats
 - Startup verification ensures clean initial state
@@ -271,7 +299,7 @@ clear_all_registrations() {
     # Use REGISTER_AND_IGNORE with param-sark=0x0 to unregister both devices
     # This approach works regardless of current key values or registration state
     mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1" || true
-    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/$DEVICE2" || true
+    sg_persist_with_retry --out --register-ignore --param-sark=0x0 "$DEVICE2" || true
 
     # Reset state tracking variables
     DEVICE1_KEY="0x0"
@@ -292,10 +320,10 @@ clear_all_registrations() {
 ## Test Execution Flow
 
 ### Initialization Phase
-1. Validate command line arguments (3 required parameters, proper error handling with usage message)
+1. Validate command line arguments (2 required parameters, proper error handling with usage message)
 2. Assign command line arguments to variables after validation
 3. Check root privileges (required for direct I/O and device access)
-4. Verify required commands exist (`mpathpersist`, `multipath`, `multipathd`, `ssh`)
+4. Verify required commands exist (`mpathpersist`, `multipath`, `multipathd`, `sg_persist`, `udevadm`)
 5. Verify `multipath-test.sh` exists and is executable
 6. Compare device WWIDs to ensure same underlying storage
 7. Clear any existing registrations using REGISTER_AND_IGNORE and verify cleanup succeeded
@@ -322,7 +350,7 @@ Loop forever:
 ### Why Bash Over C?
 1. **Command Orchestration:** All operations use command-line tools
 2. **String Processing:** Easier parsing of mpathpersist output
-3. **SSH Integration:** Natural process execution and error handling
+3. **Local Device Access:** Direct device operations without network dependencies
 4. **Maintenance:** More readable and modifiable test logic
 5. **Development Speed:** Faster implementation and debugging
 
@@ -353,26 +381,27 @@ Loop forever:
 ### System Requirements
 - Linux system with device-mapper multipath
 - Root privileges for direct device I/O
-- SSH access configured between test hosts
-- Multipath devices pointing to shared storage
+- Multipath device and SCSI device pointing to same underlying storage
+- sg_utils package for sg_persist utility
 
 ### Software Dependencies
-- `mpathpersist` - SCSI persistent reservation utility
+- `mpathpersist` - SCSI persistent reservation utility for multipath devices
+- `sg_persist` - SCSI persistent reservation utility for SCSI devices (from sg_utils)
 - `multipath` - Device-mapper multipath utility
 - `multipathd` - Multipath daemon
-- `ssh` - Secure shell for remote operations
+- `udevadm` - Device information utility
 - `dd` - Data transfer utility for I/O testing
 
-### Network Requirements
-- Passwordless SSH authentication between hosts
-- Network connectivity during entire test duration
-- Stable connection for reliable remote command execution
+### Hardware Requirements
+- Shared storage accessible as both multipath and SCSI device
+- Storage must support SCSI Persistent Reservations
+- Both devices must have matching WWIDs
 
 ## Security Considerations
 
 ### Privilege Requirements
 - Root access required for direct device I/O operations
-- SSH keys should be properly secured
+- Both devices must be accessible with appropriate permissions
 - Test should only run in isolated test environments
 
 ### Data Safety
@@ -393,7 +422,7 @@ Loop forever:
 - I/O test duration (`IO_TEST_DURATION`)
 - Key increment strategy (currently simple increment)
 - Background test script selection
-- SSH timeout and retry logic
+- sg_persist retry logic for Unit Attention handling
 
 ### Monitoring and Logging
 - Colored output for different message types
