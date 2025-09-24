@@ -17,7 +17,7 @@ mpath_pr_test.sh <device1> <device2>
 
 **Parameters:**
 - `device1`: Multipath device name (e.g., "mpatha")
-- `device2`: SCSI device pointing to the same underlying storage as device1 (e.g., "/dev/sdb")
+- `device2`: SCSI device name pointing to the same underlying storage as device1 (e.g., "sdb") - device name only, not full path
 
 ## State Management
 
@@ -45,7 +45,7 @@ check_device2_registered()
 
 **Implementation Details:**
 - Device1: Uses `mpathpersist -ik` to read registered keys
-- Device2: Uses `sg_persist_with_retry -ik` to read registered keys
+- Device2: Uses `sg_persist_with_retry -ik /dev/"$DEVICE2"` to read registered keys (uses device name with /dev/ prefix)
 - **Critical Logic**:
   - Device1: First checks for "0 registered reservation key" pattern
   - Device2: First checks for "there are NO registered reservation keys" pattern
@@ -65,6 +65,7 @@ sg_persist_with_retry()
 - **Retry Strategy**: Up to 3 attempts with 0.1 second delay between retries
 - **Error Propagation**: Non-6 exit codes immediately return as errors
 - **Timeout Protection**: Prevents infinite retry loops on persistent Unit Attention
+- **Pre-increment Fix**: Uses `((++retry_count))` instead of `((retry_count++))` to avoid arithmetic evaluation issues where zero would be treated as failure status
 
 #### State Verification
 ```bash
@@ -167,19 +168,19 @@ mpathpersist --out --clear --param-rk="$DEVICE1_KEY" /dev/mapper/"$DEVICE1"
 mpathpersist --out --preempt --param-rk="$DEVICE1_KEY" --param-sark="$DEVICE2_KEY" --prout-type=5 /dev/mapper/"$DEVICE1"
 
 # Device2 preempts device1 (using sg_persist)
-sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 "$DEVICE2"
+sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 /dev/"$DEVICE2"
 ```
 
 **Device2 Operations (using sg_persist):**
 ```bash
 # Register device2
-sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" "$DEVICE2"
+sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" /dev/"$DEVICE2"
 
 # Reserve from device2
-sg_persist_with_retry --out --reserve --param-rk="$DEVICE2_KEY" --prout-type=5 "$DEVICE2"
+sg_persist_with_retry --out --reserve --param-rk="$DEVICE2_KEY" --prout-type=5 /dev/"$DEVICE2"
 
 # Unregister device2 (cleanup)
-sg_persist_with_retry --out --register-ignore --param-sark=0x0 "$DEVICE2"
+sg_persist_with_retry --out --register-ignore --param-sark=0x0 /dev/"$DEVICE2"
 ```
 
 #### State Tracking Precision
@@ -299,7 +300,7 @@ clear_all_registrations() {
     # Use REGISTER_AND_IGNORE with param-sark=0x0 to unregister both devices
     # This approach works regardless of current key values or registration state
     mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1" || true
-    sg_persist_with_retry --out --register-ignore --param-sark=0x0 "$DEVICE2" || true
+    sg_persist_with_retry --out --register-ignore --param-sark=0x0 /dev/"$DEVICE2" || true
 
     # Reset state tracking variables
     DEVICE1_KEY="0x0"
