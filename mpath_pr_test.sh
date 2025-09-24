@@ -61,8 +61,8 @@ sg_persist_with_retry() {
         else
             local exit_code=$?
             if [[ $exit_code -eq 6 ]]; then
-                ((retry_count++))
-                log_warning "Unit Attention occurred (attempt $retry_count/$max_retries), retrying..."
+                ((++retry_count))
+                log_info "Unit Attention occurred (attempt $retry_count/$max_retries), retrying..."
                 sleep 0.1
             else
                 return $exit_code
@@ -125,7 +125,7 @@ check_device1_registered() {
 # Function to check if device2 is registered
 check_device2_registered() {
     local output
-    output=$(sg_persist_with_retry -ik "$DEVICE2" 2>/dev/null)
+    output=$(sg_persist_with_retry -ik /dev/"$DEVICE2" 2>/dev/null)
 
     # First check if no keys are registered at all
     if echo "$output" | grep -q "there are NO registered reservation keys"; then
@@ -211,7 +211,7 @@ clear_all_registrations() {
     # unregister device1
     mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1" || true
     # unregister device2
-    sg_persist_with_retry --out --register-ignore --param-sark=0x0 "$DEVICE2" || true
+    sg_persist_with_retry --out --register-ignore --param-sark=0x0 /dev/"$DEVICE2" || true
 
     # Reset state - clear command removes ALL registrations and reservations
     DEVICE1_KEY="0x0"
@@ -370,12 +370,12 @@ execute_preempt() {
 
     # Register device2
     log_info "Registering device2 with key $DEVICE2_KEY"
-    sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" "$DEVICE2"
+    sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" /dev/"$DEVICE2"
 
     # Randomly decide whether to grab reservation on device2 (only if no reservation exists)
     if [[ "$RESERVATION_HOLDER" == "" && $((RANDOM % 2)) -eq 0 ]]; then
         log_info "Device2 grabbing reservation"
-        sg_persist_with_retry --out --reserve --param-rk="$DEVICE2_KEY" --prout-type=5 "$DEVICE2"
+        sg_persist_with_retry --out --reserve --param-rk="$DEVICE2_KEY" --prout-type=5 /dev/"$DEVICE2"
         RESERVATION_HOLDER="device2"
     fi
 
@@ -393,11 +393,11 @@ execute_preempt_by_device2() {
 
     # Register device2
     log_info "Registering device2 with key $DEVICE2_KEY"
-    sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" "$DEVICE2"
+    sg_persist_with_retry --out --register-ignore --param-sark="$DEVICE2_KEY" /dev/"$DEVICE2"
 
     # Execute preempt from device2
     log_info "Device2 preempting device1 (key=$DEVICE2_KEY preempts $DEVICE1_KEY)"
-    sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 "$DEVICE2"
+    sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 /dev/"$DEVICE2"
     DEVICE1_KEY="0x0"  # Device1 gets unregistered
     if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
         RESERVATION_HOLDER="device2"
@@ -544,8 +544,8 @@ main() {
 # Script entry point
 if [[ $# -ne 2 ]]; then
     echo "Usage: $0 <device1> <device2>"
-    echo "  device1: Local multipath device (e.g., mpatha)"
-    echo "  device2: Local SCSI device pointing to same storage (e.g., /dev/sdb)"
+    echo "  device1: multipath device (e.g., mpatha)"
+    echo "  device2: SCSI device pointing to same storage (e.g., sdb)"
     exit 1
 fi
 
