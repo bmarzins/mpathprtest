@@ -155,6 +155,14 @@ mpathpersist --out --preempt --param-rk="$DEVICE1_KEY" --param-sark="$DEVICE2_KE
 ssh "$HOST" "mpathpersist --out --preempt --param-rk=$DEVICE2_KEY --param-sark=$DEVICE1_KEY --prout-type=5 /dev/mapper/$DEVICE2"
 ```
 
+#### State Tracking Precision
+**Conditional Reservation Updates:** The implementation includes precise tracking of reservation holder changes:
+
+- **REGISTER/REGISTER_AND_IGNORE unregister**: Only clears `RESERVATION_HOLDER` if device1 was holding it
+- **RELEASE**: Only clears `RESERVATION_HOLDER` if device1 was holding the reservation
+- **PREEMPT operations**: Only change `RESERVATION_HOLDER` if the operation actually preempted an existing reservation
+- **Prevents false state**: Avoids incorrectly clearing reservation holder when device1 wasn't actually holding it
+
 ### Multi-Host Testing
 
 #### PREEMPT Test Scenarios
@@ -239,13 +247,15 @@ kill "$MULTIPATH_TEST_PID" 2>/dev/null || true
 wait "$MULTIPATH_TEST_PID" 2>/dev/null || true
 ```
 
+**Background Process Cleanup:** The `multipath-test.sh` script uses `trap cleanup EXIT` (without INT/TERM) to ensure proper cleanup when terminated by the main test script.
+
 ## Error Handling and Cleanup
 
 ### Cleanup Strategy
 **Triggered by:** Script exit, interrupt signals (INT, TERM)
 **Actions:**
 1. Kill background multipath test process
-2. Clear all registrations from storage (optimized - only one clear needed)
+2. Unregister both devices using REGISTER_AND_IGNORE (works regardless of current state)
 3. Reset all state variables
 
 ### Error Recovery
@@ -258,13 +268,15 @@ wait "$MULTIPATH_TEST_PID" 2>/dev/null || true
 ### Cleanup Implementation
 ```bash
 clear_all_registrations() {
-    # Try device1 first, fallback to device2 if needed
-    # Since --clear removes ALL registrations, only one command needed
-    if check_device1_registered; then
-        mpathpersist --out --clear --param-rk="$DEVICE1_KEY" /dev/mapper/"$DEVICE1" || true
-    elif check_device2_registered; then
-        ssh "$HOST" "mpathpersist --out --clear --param-rk=$DEVICE2_KEY /dev/mapper/$DEVICE2" || true
-    fi
+    # Use REGISTER_AND_IGNORE with param-sark=0x0 to unregister both devices
+    # This approach works regardless of current key values or registration state
+    mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/"$DEVICE1" || true
+    ssh "$HOST" "mpathpersist --out --register-ignore --param-sark=0x0 /dev/mapper/$DEVICE2" || true
+
+    # Reset state tracking variables
+    DEVICE1_KEY="0x0"
+    DEVICE1_NEXT_KEY="0x2"
+    RESERVATION_HOLDER=""
 
     # With verification for startup (ensures clean state)
     if [[ "$verify_clear" == "true" ]]; then
@@ -280,13 +292,14 @@ clear_all_registrations() {
 ## Test Execution Flow
 
 ### Initialization Phase
-1. Validate command line arguments (3 required parameters)
-2. Check root privileges (required for direct I/O and device access)
-3. Verify required commands exist (`mpathpersist`, `multipath`, `multipathd`, `ssh`)
-4. Verify `multipath-test.sh` exists and is executable
-5. Compare device WWIDs to ensure same underlying storage
-6. Clear any existing registrations and verify cleanup succeeded
-7. Start background multipath test process
+1. Validate command line arguments (3 required parameters, proper error handling with usage message)
+2. Assign command line arguments to variables after validation
+3. Check root privileges (required for direct I/O and device access)
+4. Verify required commands exist (`mpathpersist`, `multipath`, `multipathd`, `ssh`)
+5. Verify `multipath-test.sh` exists and is executable
+6. Compare device WWIDs to ensure same underlying storage
+7. Clear any existing registrations using REGISTER_AND_IGNORE and verify cleanup succeeded
+8. Start background multipath test process
 
 ### Main Test Loop
 ```
