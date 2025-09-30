@@ -582,6 +582,13 @@ start_background_test() {
 
 # Function to cleanup on exit
 cleanup() {
+    log_info "Exit state."
+    log_info "Registered keys:"
+    mpathpersist -ik /dev/mapper/"$DEVICE1"
+    log_info "Reservation:"
+    mpathpersist -ir /dev/mapper/"$DEVICE1"
+    log_info "multipath state:"
+    multipath -l "$DEVICE1"
     log_info "Cleaning up..."
 
     # Stop I/O test
