@@ -325,10 +325,11 @@ wait "$MULTIPATH_TEST_PID" 2>/dev/null || true
 ### Cleanup Strategy
 **Triggered by:** Script exit, interrupt signals (INT, TERM)
 **Actions:**
-1. Stop background I/O test process (TERM signal, validate exit code)
-2. Kill background multipath test process
-3. Unregister both devices using REGISTER_AND_IGNORE (works regardless of current state)
-4. Reset all state variables
+1. Print exit state diagnostics (registered keys, reservations, multipath device state)
+2. Stop background I/O test process (TERM signal, validate exit code)
+3. Kill background multipath test process
+4. Unregister both devices using REGISTER_AND_IGNORE (works regardless of current state)
+5. Reset all state variables
 
 ### Error Recovery
 - All mpathpersist commands include error checking
@@ -339,6 +340,25 @@ wait "$MULTIPATH_TEST_PID" 2>/dev/null || true
 
 ### Cleanup Implementation
 ```bash
+cleanup() {
+    # Print diagnostic information before cleanup
+    log_info "Exit state."
+    log_info "Registered keys:"
+    mpathpersist -ik /dev/mapper/"$DEVICE1"
+    log_info "Reservation:"
+    mpathpersist -ir /dev/mapper/"$DEVICE1"
+    log_info "multipath state:"
+    multipath -l "$DEVICE1"
+    log_info "Cleaning up..."
+
+    # Stop background I/O test and validate exit code
+    # Kill background multipath test
+    # ...
+
+    # Clear all registrations
+    clear_all_registrations
+}
+
 clear_all_registrations() {
     # Use REGISTER_AND_IGNORE with param-sark=0x0 to unregister both devices
     # This approach works regardless of current key values or registration state
