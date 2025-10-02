@@ -21,6 +21,7 @@ DEVICE1_KEY="0x0"        # Current key for device1 (0x0 = not registered)
 DEVICE2_KEY="0x1"        # Fixed key for device2 when registered
 DEVICE1_NEXT_KEY="0x2"   # Next key to use for device1 registration
 RESERVATION_HOLDER=""    # "device1", "device2", or "" (no reservation)
+PREEMPTED_KEY=""         # Key that was just preempted (for verification)
 
 # Background process tracking
 MULTIPATH_TEST_PID=""
@@ -202,6 +203,18 @@ verify_state() {
         fi
     fi
 
+    # Check if a key was just preempted and verify it's no longer registered
+    if [[ -n "$PREEMPTED_KEY" ]]; then
+        output=$(mpathpersist -ik /dev/mapper/"$DEVICE1" 2>/dev/null)
+        if echo "$output" | grep -q "$PREEMPTED_KEY"; then
+            log_error "State verification failed: preempted key $PREEMPTED_KEY should not be registered but was found"
+            log_error "Registration output: $output"
+            exit 1
+        fi
+        log_info "Verified preempted key $PREEMPTED_KEY was removed"
+        PREEMPTED_KEY=""  # Clear after verification
+    fi
+
     log_info "State verified: device1_key=$DEVICE1_KEY, reservation_holder=$RESERVATION_HOLDER"
 }
 
@@ -220,6 +233,7 @@ clear_all_registrations() {
     DEVICE1_KEY="0x0"
     DEVICE1_NEXT_KEY="0x2"
     RESERVATION_HOLDER=""
+    PREEMPTED_KEY=""
 
     # Verify clearing succeeded if requested (for startup)
     if [[ "$verify_clear" == "true" ]]; then
@@ -462,6 +476,7 @@ execute_preempt() {
     # Execute preempt from device1
     log_info "Device1 preempting device2 (key=$DEVICE1_KEY preempts $DEVICE2_KEY)"
     mpathpersist --out --preempt --param-rk="$DEVICE1_KEY" --param-sark="$DEVICE2_KEY" --prout-type=5 /dev/mapper/"$DEVICE1"
+    PREEMPTED_KEY="$DEVICE2_KEY"
     if [[ "$RESERVATION_HOLDER" == "device2" ]]; then
         RESERVATION_HOLDER="device1"
     fi
@@ -478,6 +493,7 @@ execute_preempt_by_device2() {
     # Execute preempt from device2
     log_info "Device2 preempting device1 (key=$DEVICE2_KEY preempts $DEVICE1_KEY)"
     sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 /dev/"$DEVICE2"
+    PREEMPTED_KEY="$DEVICE1_KEY"
     DEVICE1_KEY="0x0"  # Device1 gets unregistered
     if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
         RESERVATION_HOLDER="device2"

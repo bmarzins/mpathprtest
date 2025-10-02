@@ -27,6 +27,7 @@ DEVICE1_KEY="0x0"        # Current registration key for device1 (0x0 = not regis
 DEVICE2_KEY="0x1"        # Fixed registration key for device2 when registered
 DEVICE1_NEXT_KEY="0x2"   # Next key to assign to device1 (increments: 0x2, 0x3, 0x4...)
 RESERVATION_HOLDER=""    # Current reservation holder: "device1", "device2", or "" (none)
+PREEMPTED_KEY=""         # Key that was just preempted (for verification, cleared after verify_state)
 ```
 
 ### Key Management Strategy
@@ -76,6 +77,10 @@ verify_state()
 - Verifies actual device state matches tracked state variables
 - **Device1 Registration**: Only checks if `DEVICE1_KEY != "0x0"` (trusts that 0x0 never appears in key lists)
 - **Reservation Status**: Always validates reservation holder matches `RESERVATION_HOLDER`
+- **Preemption Verification**: If `PREEMPTED_KEY` is set, verifies that key does NOT appear in registered keys output
+  - Queries `mpathpersist -ik` and ensures preempted key is absent
+  - Logs verification success and clears `PREEMPTED_KEY` after check
+  - Exits with error if preempted key still found (indicates preempt command failed)
 - **Fail Fast**: Exits with error if verification fails, indicating command or state tracking bugs
 
 ## Device Verification
@@ -166,9 +171,11 @@ mpathpersist --out --clear --param-rk="$DEVICE1_KEY" /dev/mapper/"$DEVICE1"
 ```bash
 # Device1 preempts device2
 mpathpersist --out --preempt --param-rk="$DEVICE1_KEY" --param-sark="$DEVICE2_KEY" --prout-type=5 /dev/mapper/"$DEVICE1"
+# Sets PREEMPTED_KEY="$DEVICE2_KEY" for verification
 
 # Device2 preempts device1 (using sg_persist)
 sg_persist_with_retry --out --preempt --param-rk="$DEVICE2_KEY" --param-sark="$DEVICE1_KEY" --prout-type=5 /dev/"$DEVICE2"
+# Sets PREEMPTED_KEY="$DEVICE1_KEY" for verification
 ```
 
 **Device2 Operations (using sg_persist):**
@@ -369,6 +376,7 @@ clear_all_registrations() {
     DEVICE1_KEY="0x0"
     DEVICE1_NEXT_KEY="0x2"
     RESERVATION_HOLDER=""
+    PREEMPTED_KEY=""
 
     # With verification for startup (ensures clean state)
     if [[ "$verify_clear" == "true" ]]; then
