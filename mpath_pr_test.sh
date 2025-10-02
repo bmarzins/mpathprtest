@@ -212,7 +212,6 @@ verify_state() {
             exit 1
         fi
         log_info "Verified preempted key $PREEMPTED_KEY was removed"
-        PREEMPTED_KEY=""  # Clear after verification
     fi
 
     # Verify multipathd's view of PR state (only if device1 wasn't preempted)
@@ -273,6 +272,7 @@ verify_state() {
 
         log_info "multipathd state verified: prkey=$prkey_output, prstatus=$prstatus_output, prhold=$prhold_output"
     fi
+    PREEMPTED_KEY=""  # Clear after verification
 
     log_info "State verified: device1_key=$DEVICE1_KEY, reservation_holder=$RESERVATION_HOLDER"
 }
