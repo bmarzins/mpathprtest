@@ -24,6 +24,9 @@ RESERVATION_HOLDER=""    # "device1", "device2", or "" (no reservation)
 
 # Background process tracking
 MULTIPATH_TEST_PID=""
+IO_TEST_PID=""
+CURRENT_IO_EXPECTED=""
+IO_TEST_RUNNING=false
 
 # Function to print colored output
 log_info() {
@@ -233,58 +236,6 @@ clear_all_registrations() {
     fi
 }
 
-# Function to perform I/O test
-perform_io_test() {
-    local expected_result=$1
-    local test_file="/dev/mapper/$DEVICE1"
-    local temp_data="/tmp/mpath_pr_test_$$"
-
-    log_info "Performing I/O test (expected: $expected_result) for $IO_TEST_DURATION seconds..."
-
-    # Create test data
-    dd if=/dev/urandom of="$temp_data" bs=4096 count=1 2>/dev/null
-
-    local start_time=$(date +%s)
-    local end_time=$((start_time + IO_TEST_DURATION))
-    local any_io_succeeded=false
-    local any_io_failed=false
-
-    while [[ $(date +%s) -lt $end_time ]]; do
-        if dd if="$temp_data" of="$test_file" bs=4096 count=1 oflag=direct 2>/dev/null; then
-            any_io_succeeded=true
-            # If I/O should fail, fail immediately on first success
-            if [[ "$expected_result" == "fail" ]]; then
-                break
-            fi
-        else
-            any_io_failed=true
-            # If I/O should pass, fail immediately on first failure
-            if [[ "$expected_result" == "pass" ]]; then
-                break
-            fi
-        fi
-        sleep 0.1
-    done
-
-    rm -f "$temp_data"
-
-    if [[ "$expected_result" == "pass" ]]; then
-        if [[ "$any_io_failed" == "false" ]]; then
-            log_success "I/O test passed: I/O succeeded as expected"
-        else
-            log_error "I/O test failed: I/O failed but should have succeeded"
-            return 1
-        fi
-    else
-        if [[ "$any_io_succeeded" == "false" ]]; then
-            log_success "I/O test passed: I/O failed as expected"
-        else
-            log_error "I/O test failed: I/O succeeded but should have failed"
-            return 1
-        fi
-    fi
-}
-
 # Function to determine expected I/O result
 get_expected_result() {
     # I/O should succeed if device1 has a registered key
@@ -297,6 +248,135 @@ get_expected_result() {
         else
             echo "pass"
         fi
+    fi
+}
+
+# Function to start background I/O test
+start_io_test() {
+    local expected_result=$1
+
+    if [[ "$IO_TEST_RUNNING" == "true" ]]; then
+        log_error "I/O test is already running (PID: $IO_TEST_PID)"
+        return 1
+    fi
+
+    log_info "Starting background I/O test (expected: $expected_result)"
+
+    # Start io_test.sh in background
+    ./io_test.sh "/dev/mapper/$DEVICE1" "$expected_result" &
+    IO_TEST_PID=$!
+    CURRENT_IO_EXPECTED="$expected_result"
+    IO_TEST_RUNNING=true
+
+    # Verify process started
+    sleep 0.1
+    if ! kill -0 "$IO_TEST_PID" 2>/dev/null; then
+        log_error "Failed to start I/O test process"
+        IO_TEST_PID=""
+        CURRENT_IO_EXPECTED=""
+        IO_TEST_RUNNING=false
+        return 1
+    fi
+
+    log_info "I/O test started successfully (PID: $IO_TEST_PID)"
+}
+
+# Function to stop background I/O test
+stop_io_test() {
+    if [[ "$IO_TEST_RUNNING" != "true" ]]; then
+        log_error "I/O test is not currently running"
+        return 1
+    fi
+
+    log_info "Stopping background I/O test (PID: $IO_TEST_PID)"
+
+    # Send TERM signal
+    kill -TERM "$IO_TEST_PID" 2>/dev/null || true
+
+    # Wait for process to exit and capture exit code
+    local exit_code=0
+    if ! wait "$IO_TEST_PID" 2>/dev/null; then
+        exit_code=$?
+    fi
+
+    # Reset tracking variables
+    IO_TEST_PID=""
+    CURRENT_IO_EXPECTED=""
+    IO_TEST_RUNNING=false
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_error "I/O test failed with exit code $exit_code"
+        return 1
+    fi
+
+    log_info "I/O test stopped successfully"
+}
+
+# Function to check if I/O test is still running
+check_io_test_running() {
+    if [[ "$IO_TEST_RUNNING" != "true" ]]; then
+        log_error "I/O test should be running but is not"
+        return 1
+    fi
+
+    if ! kill -0 "$IO_TEST_PID" 2>/dev/null; then
+        # Process is not running, get exit code
+        local exit_code=0
+        wait "$IO_TEST_PID" 2>/dev/null || exit_code=$?
+
+        log_error "I/O test process unexpectedly stopped with exit code $exit_code"
+        IO_TEST_PID=""
+        CURRENT_IO_EXPECTED=""
+        IO_TEST_RUNNING=false
+        return 1
+    fi
+
+    log_info "I/O test is running normally"
+}
+
+# Function to determine if I/O expectation will change after a command
+will_io_expectation_change() {
+    local command=$1
+    local current_expected="$CURRENT_IO_EXPECTED"
+    local new_expected
+
+    # Calculate what the new expectation would be after the command
+    case "$command" in
+        "RESERVE"|"RELEASE"|"CLEAR"|"PREEMPT")
+            # These commands always result in pass (I/O always succeeds)
+            new_expected="pass"
+            ;;
+        "REGISTER"|"REGISTER_NEW"|"REGISTER_AND_IGNORE"|"REGISTER_AND_IGNORE_NEW")
+            # Registration always results in pass (device1 will have a key)
+            new_expected="pass"
+            ;;
+        "REGISTER_UNREGISTER"|"REGISTER_AND_IGNORE_UNREGISTER")
+            # If device2 holds reservation, I/O will fail. Otherwise pass.
+            if [[ "$RESERVATION_HOLDER" == "device2" ]]; then
+                new_expected="fail"
+            else
+                new_expected="pass"
+            fi
+            ;;
+        "PREEMPT_BY_DEVICE2")
+            # I/O will fail if either device holds reservation, pass if no reservation
+            if [[ -n "$RESERVATION_HOLDER" ]]; then
+                new_expected="fail"
+            else
+                new_expected="pass"
+            fi
+            ;;
+        *)
+            log_error "Unknown command in will_io_expectation_change: $command"
+            return 1
+            ;;
+    esac
+
+    # Return true (0) if expectation will change, false (1) if same
+    if [[ "$current_expected" != "$new_expected" ]]; then
+        return 0  # Will change
+    else
+        return 1  # Will not change
     fi
 }
 
@@ -431,9 +511,18 @@ execute_random_command() {
     read -ra commands <<< "$(get_valid_commands)"
 
     local command="${commands[$((RANDOM % ${#commands[@]}))]}"
+    local io_test_was_stopped=false
 
     log_info "Selected command: $command"
 
+    # Check if I/O expectation will change after this command
+    if will_io_expectation_change "$command"; then
+        log_info "I/O expectation will change, stopping I/O test"
+        stop_io_test
+        io_test_was_stopped=true
+    fi
+
+    # Execute the selected command
     case "$command" in
         "REGISTER")
             execute_register "new_key"
@@ -473,6 +562,14 @@ execute_random_command() {
             return 1
             ;;
     esac
+
+    # If we stopped the I/O test, restart it with the new expectation
+    if [[ "$io_test_was_stopped" == "true" ]]; then
+        local new_expected_result
+        new_expected_result=$(get_expected_result)
+        log_info "Restarting I/O test with new expectation: $new_expected_result"
+        start_io_test "$new_expected_result"
+    fi
 }
 
 # Function to start background multipath test
@@ -487,7 +584,17 @@ start_background_test() {
 cleanup() {
     log_info "Cleaning up..."
 
-    # Kill background test
+    # Stop I/O test
+    if [[ "$IO_TEST_RUNNING" == "true" && -n "$IO_TEST_PID" ]]; then
+        log_info "Stopping I/O test (PID $IO_TEST_PID)..."
+        kill -TERM "$IO_TEST_PID" 2>/dev/null || true
+        wait "$IO_TEST_PID" 2>/dev/null || true
+        IO_TEST_PID=""
+        IO_TEST_RUNNING=false
+        CURRENT_IO_EXPECTED=""
+    fi
+
+    # Kill background multipath test
     if [[ -n "$MULTIPATH_TEST_PID" ]]; then
         log_info "Stopping background test (PID $MULTIPATH_TEST_PID)..."
         kill "$MULTIPATH_TEST_PID" 2>/dev/null || true
@@ -513,6 +620,9 @@ main() {
     # Clear any existing registrations and verify success
     clear_all_registrations true
 
+    # Start background I/O test (initially expecting pass since no reservations exist)
+    start_io_test "pass"
+
     # Start background multipath test
     start_background_test
 
@@ -528,10 +638,10 @@ main() {
         # Verify state after command
         verify_state
 
-        # Perform I/O test
-        local io_expectation
-        io_expectation=$(get_expected_result)
-        perform_io_test "$io_expectation"
+        # Wait for I/O test duration and then check if I/O test is still running
+        log_info "Waiting $IO_TEST_DURATION seconds for I/O test validation..."
+        sleep "$IO_TEST_DURATION"
+        check_io_test_running
 
         log_success "Iteration $iteration completed successfully"
         ((iteration++))

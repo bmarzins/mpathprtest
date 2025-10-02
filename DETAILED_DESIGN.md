@@ -228,34 +228,68 @@ sg_persist_with_retry --out --register-ignore --param-sark=0x0 /dev/"$DEVICE2"
 #### Expected Failure Conditions
 - Device1 not registered AND reservation exists (type 5 behavior)
 
-### I/O Test Implementation
+### Background I/O Test Implementation
+
+**Approach:** Continuous I/O monitoring using standalone `io_test.sh` script instead of brief periodic tests.
+
+#### Core Functions
 ```bash
-perform_io_test() {
-    local expected_result=$1  # "pass" or "fail"
+start_io_test(expected_result) {
+    # Start io_test.sh in background with expected result ("pass" or "fail")
+    # Track PID and current expectation
+    # Validate process started successfully
+}
 
-    # Create random test data
-    dd if=/dev/urandom of="$temp_data" bs=4096 count=1
+stop_io_test() {
+    # Send TERM signal to io_test.sh
+    # Wait for process exit and validate exit code
+    # Fail if exit code indicates I/O test failure
+}
 
-    # Perform I/O for specified duration with early exit optimization
-    while [[ $(date +%s) -lt $end_time ]]; do
-        if dd if="$temp_data" of="/dev/mapper/$DEVICE1" bs=4096 count=1 oflag=direct; then
-            any_io_succeeded=true
-            # Exit immediately if I/O should fail
-            if [[ "$expected_result" == "fail" ]]; then break; fi
-        else
-            any_io_failed=true
-            # Exit immediately if I/O should pass
-            if [[ "$expected_result" == "pass" ]]; then break; fi
-        fi
-    done
+check_io_test_running() {
+    # Verify io_test.sh is still running
+    # If stopped unexpectedly, capture and report exit code
+}
 
-    # Validate result matches expectation
-    # - When should pass: fail if ANY I/O failed
-    # - When should fail: fail if ANY I/O succeeded
+will_io_expectation_change(command) {
+    # Analyze if command will change expected I/O result
+    # Return true if stop/restart needed, false if can continue
 }
 ```
 
+#### I/O Expectation Management by Command Type
+
+**No expectation change (continue running):**
+- RESERVE, RELEASE, CLEAR, PREEMPT: Always result in "pass"
+
+**Always result in "pass" (stop if currently expecting "fail"):**
+- REGISTER, REGISTER_NEW, REGISTER_AND_IGNORE, REGISTER_AND_IGNORE_NEW
+
+**Conditional expectation changes:**
+- REGISTER_UNREGISTER, REGISTER_AND_IGNORE_UNREGISTER:
+  - Result: "fail" if device2 holds reservation, "pass" otherwise
+- PREEMPT_BY_DEVICE2:
+  - Result: "fail" if any device holds reservation, "pass" if no reservation
+
+#### Test Flow Integration
+1. **Initialization:** Start `io_test.sh` expecting "pass" after clearing registrations
+2. **Before each command:** Check if expectation will change
+3. **If changing:** Stop I/O test, execute command, restart with new expectation
+4. **If not changing:** Execute command while I/O test continues
+5. **After each command:** Wait IO_TEST_DURATION, verify I/O test still running
+6. **Cleanup:** Stop I/O test before clearing registrations
+
 ## Background Process Integration
+
+### I/O Testing Process
+**Process:** `io_test.sh` runs continuously in background
+**Purpose:** Continuously validates I/O operations against expected behavior
+**Features:**
+- Runs `dd if=/dev/zero of=<device> bs=4k count=1 oflag=direct` with 0.1s intervals
+- Accepts expected result ("pass" or "fail") as parameter
+- Exits with failure if actual result doesn't match expected
+- Handles TERM signal gracefully (exits with success code 0)
+- Provides visual feedback: "." for successful I/O, "x" for failed I/O
 
 ### Multipath Path Testing
 **Process:** `multipath-test.sh` runs continuously in background
@@ -267,25 +301,34 @@ perform_io_test() {
 
 ### Process Management
 ```bash
-# Start background test
+# Start background I/O test
+./io_test.sh "/dev/mapper/$DEVICE1" "pass" &
+IO_TEST_PID=$!
+
+# Start background multipath test
 ./multipath-test.sh "$DEVICE1" &
 MULTIPATH_TEST_PID=$!
 
 # Cleanup on exit
+kill -TERM "$IO_TEST_PID" 2>/dev/null || true
+wait "$IO_TEST_PID" 2>/dev/null || true
 kill "$MULTIPATH_TEST_PID" 2>/dev/null || true
 wait "$MULTIPATH_TEST_PID" 2>/dev/null || true
 ```
 
-**Background Process Cleanup:** The `multipath-test.sh` script uses `trap cleanup EXIT` (without INT/TERM) to ensure proper cleanup when terminated by the main test script.
+**Background Process Cleanup:**
+- The `io_test.sh` script handles TERM signals gracefully and exits with code 0
+- The `multipath-test.sh` script uses `trap cleanup EXIT` (without INT/TERM) to ensure proper cleanup when terminated by the main test script
 
 ## Error Handling and Cleanup
 
 ### Cleanup Strategy
 **Triggered by:** Script exit, interrupt signals (INT, TERM)
 **Actions:**
-1. Kill background multipath test process
-2. Unregister both devices using REGISTER_AND_IGNORE (works regardless of current state)
-3. Reset all state variables
+1. Stop background I/O test process (TERM signal, validate exit code)
+2. Kill background multipath test process
+3. Unregister both devices using REGISTER_AND_IGNORE (works regardless of current state)
+4. Reset all state variables
 
 ### Error Recovery
 - All mpathpersist commands include error checking
