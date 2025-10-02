@@ -86,7 +86,7 @@ verify_device_wwids() {
     local device2_wwid
 
     # Get WWID of device1
-    device1_wwid=$(multipathd show maps raw format "%n %w" | grep "$DEVICE1" | awk '{print $2}')
+    device1_wwid=$(multipathd show maps raw format "%n %w" | grep "$DEVICE1 " | awk '{print $2}')
     if [[ -z "$device1_wwid" ]]; then
         log_error "Could not get WWID for $DEVICE1"
         exit 1
@@ -119,7 +119,7 @@ check_device1_registered() {
     fi
 
     # Keys exist, check if our specific key is present
-    if echo "$output" | grep -q "$DEVICE1_KEY"; then
+    if echo "$output" | grep -q "$DEVICE1_KEY\b"; then
         return 0  # Registered with our expected key
     else
         return 1  # Not registered
@@ -137,7 +137,7 @@ check_device2_registered() {
     fi
 
     # Keys exist, check if device2's key is present
-    if echo "$output" | grep -q "$DEVICE2_KEY"; then
+    if echo "$output" | grep -q "$DEVICE2_KEY\b"; then
         return 0  # Registered with expected key
     else
         return 1  # Not registered
@@ -159,7 +159,7 @@ verify_state() {
     # Check device1 registration status (only if we expect it to be registered)
     if [[ "$DEVICE1_KEY" != "0x0" ]]; then
         output=$(mpathpersist -ik /dev/mapper/"$DEVICE1" 2>/dev/null)
-        if echo "$output" | grep -q "0 registered reservation key" || ! echo "$output" | grep -q "$DEVICE1_KEY"; then
+        if echo "$output" | grep -q "0 registered reservation key" || ! echo "$output" | grep -q "$DEVICE1_KEY\b"; then
             log_error "State verification failed: device1 should be registered with key $DEVICE1_KEY but not found"
             log_error "Registration output: $output"
             exit 1
@@ -206,7 +206,7 @@ verify_state() {
     # Check if a key was just preempted and verify it's no longer registered
     if [[ -n "$PREEMPTED_KEY" ]]; then
         output=$(mpathpersist -ik /dev/mapper/"$DEVICE1" 2>/dev/null)
-        if echo "$output" | grep -q "$PREEMPTED_KEY"; then
+        if echo "$output" | grep -q "$PREEMPTED_KEY\b"; then
             log_error "State verification failed: preempted key $PREEMPTED_KEY should not be registered but was found"
             log_error "Registration output: $output"
             exit 1
