@@ -215,6 +215,65 @@ verify_state() {
         PREEMPTED_KEY=""  # Clear after verification
     fi
 
+    # Verify multipathd's view of PR state (only if device1 wasn't preempted)
+    if [[ -z "$PREEMPTED_KEY" || "$PREEMPTED_KEY" == "$DEVICE2_KEY" ]]; then
+        # Verify registration key
+        local prkey_output
+        prkey_output=$(multipathd getprkey map "$DEVICE1" 2>/dev/null)
+
+        if [[ "$DEVICE1_KEY" == "0x0" ]]; then
+            if [[ "$prkey_output" != "none" ]]; then
+                log_error "State verification failed: multipathd getprkey should return 'none' for unregistered device1"
+                log_error "multipathd getprkey output: $prkey_output"
+                exit 1
+            fi
+        else
+            if [[ "$prkey_output" != "$DEVICE1_KEY" ]]; then
+                log_error "State verification failed: multipathd getprkey should return $DEVICE1_KEY"
+                log_error "multipathd getprkey output: $prkey_output"
+                exit 1
+            fi
+        fi
+
+        # Verify registration status
+        local prstatus_output
+        prstatus_output=$(multipathd getprstatus map "$DEVICE1" 2>/dev/null)
+
+        if [[ "$DEVICE1_KEY" == "0x0" ]]; then
+            if [[ "$prstatus_output" != "unset" ]]; then
+                log_error "State verification failed: multipathd getprstatus should return 'unset' for unregistered device1"
+                log_error "multipathd getprstatus output: $prstatus_output"
+                exit 1
+            fi
+        else
+            if [[ "$prstatus_output" != "set" ]]; then
+                log_error "State verification failed: multipathd getprstatus should return 'set' for registered device1"
+                log_error "multipathd getprstatus output: $prstatus_output"
+                exit 1
+            fi
+        fi
+
+        # Verify reservation holder
+        local prhold_output
+        prhold_output=$(multipathd getprhold map "$DEVICE1" 2>/dev/null)
+
+        if [[ "$RESERVATION_HOLDER" == "device1" ]]; then
+            if [[ "$prhold_output" != "set" ]]; then
+                log_error "State verification failed: multipathd getprhold should return 'set' when device1 holds reservation"
+                log_error "multipathd getprhold output: $prhold_output"
+                exit 1
+            fi
+        else
+            if [[ "$prhold_output" != "unset" ]]; then
+                log_error "State verification failed: multipathd getprhold should return 'unset' when device1 doesn't hold reservation"
+                log_error "multipathd getprhold output: $prhold_output"
+                exit 1
+            fi
+        fi
+
+        log_info "multipathd state verified: prkey=$prkey_output, prstatus=$prstatus_output, prhold=$prhold_output"
+    fi
+
     log_info "State verified: device1_key=$DEVICE1_KEY, reservation_holder=$RESERVATION_HOLDER"
 }
 

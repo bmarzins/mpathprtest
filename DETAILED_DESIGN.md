@@ -81,6 +81,17 @@ verify_state()
   - Queries `mpathpersist -ik` and ensures preempted key is absent
   - Logs verification success and clears `PREEMPTED_KEY` after check
   - Exits with error if preempted key still found (indicates preempt command failed)
+- **multipathd State Verification**: If device1 wasn't preempted (when `PREEMPTED_KEY` is empty or equals `DEVICE2_KEY`), verifies multipathd's view of PR state:
+  - **Registration Key** (`multipathd getprkey map $DEVICE1`):
+    - Returns "none" when `DEVICE1_KEY == "0x0"`
+    - Returns `$DEVICE1_KEY` when registered
+  - **Registration Status** (`multipathd getprstatus map $DEVICE1`):
+    - Returns "unset" when `DEVICE1_KEY == "0x0"`
+    - Returns "set" when registered
+  - **Reservation Holder** (`multipathd getprhold map $DEVICE1`):
+    - Returns "set" when `RESERVATION_HOLDER == "device1"`
+    - Returns "unset" otherwise
+  - Skips verification if device1 was preempted to avoid checking stale state
 - **Fail Fast**: Exits with error if verification fails, indicating command or state tracking bugs
 
 ## Device Verification
