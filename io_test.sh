@@ -39,18 +39,26 @@ echo "Press Ctrl+C or send TERM signal to stop"
 
 # Main test loop
 while true; do
-    if dd if=/dev/zero of="$DEVICE" bs=4k count=1 oflag=direct 2>/dev/null; then
-        # dd command succeeded
+    if sg_dd if=/dev/zero of="$DEVICE" bs=512 bpt=8 count=8 oflag=direct,sgio 2>/dev/null; then
+        # sg_dd command succeeded
         if [[ "$EXPECTED_RESULT" == "fail" ]]; then
             echo "FAILURE: I/O succeeded but was expected to fail"
             exit 1
         fi
         echo -n "."
     else
-        # dd command failed
+        # sg_dd command failed
+        EXIT_CODE=$?
         if [[ "$EXPECTED_RESULT" == "pass" ]]; then
-            echo "FAILURE: I/O failed but was expected to pass"
-            exit 1
+            if [[ $EXIT_CODE -eq 24 ]]; then
+                echo "FAILURE: I/O failed with conflict but was expected to pass"
+                exit 1
+            fi
+            echo "I/O failed with $EXIT_CODE. checking paths"
+            if ! ./probe "$DEVICE" ; then
+                echo "FAILURE: probing paths failed"
+		exit 1
+            fi
         fi
         echo -n "x"
     fi
