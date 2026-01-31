@@ -123,36 +123,33 @@ show_multipath_status() {
     echo
 }
 
-# Function to test a single path
-test_path() {
+# Function to disable a single path
+disable_path() {
     local device=$1
     local path=$2
-    
+
     echo
-    log_info "Testing path: $path"
-    # log_info "============================================"
-    
-    # Show initial status
-    # show_multipath_status "$device"
-    
-    # Disable path
+    log_info "Disabling path: $path"
+
     if set_path_state "$path" "offline"; then
         wait_for_multipathd "$device" "$path" "failed"
-        
-        # Show status after disabling
-        # show_multipath_status "$device"
-        
-        # Re-enable path
-        if set_path_state "$path" "running"; then
-            wait_for_multipathd "$device" "$path" "active"
-            
-            # Show status after re-enabling
-            # show_multipath_status "$device"
-        else
-            log_error "Failed to re-enable $path"
-        fi
     else
         log_error "Failed to disable $path"
+    fi
+}
+
+# Function to enable a single path
+enable_path() {
+    local device=$1
+    local path=$2
+
+    echo
+    log_info "Enabling path: $path"
+
+    if set_path_state "$path" "running"; then
+        wait_for_multipathd "$device" "$path" "active"
+    else
+        log_error "Failed to enable $path"
     fi
 }
 
@@ -209,14 +206,29 @@ main() {
         echo
         log_info "Starting cycle $cycle"
         # log_info "========================================"
-        
+
         for path in "${paths[@]}"; do
-            test_path "$device" "$path"
-    
-            log_info "Waiting $CYCLE_DELAY seconds before next path..."
-            sleep "$CYCLE_DELAY"
+            log_info "Testing with $path as the active path"
+
+            # Disable all other paths
+            for other_path in "${paths[@]}"; do
+                if [[ "$other_path" != "$path" ]]; then
+                    disable_path "$device" "$other_path"
+                    log_info "Waiting $CYCLE_DELAY seconds before next path..."
+                    sleep "$CYCLE_DELAY"
+                fi
+            done
+
+            # Re-enable all other paths
+            for other_path in "${paths[@]}"; do
+                if [[ "$other_path" != "$path" ]]; then
+                    enable_path "$device" "$other_path"
+                    log_info "Waiting $CYCLE_DELAY seconds before next path..."
+                    sleep "$CYCLE_DELAY"
+                fi
+            done
         done
-        
+
         log_success "Completed cycle $cycle"
         ((cycle++))
     done
