@@ -208,29 +208,46 @@ main() {
         # log_info "========================================"
 
         for path in "${paths[@]}"; do
+	    tgt_path=`multipath -l "$device" | grep -A1 "status=active" | grep -o "sd."`
+	    if [[ -z "$tgt_path" ]]; then
+		break
+	    fi
+	    if [[ "$tgt_path" != "$path" ]]; then
+		continue
+	    fi
             log_info "Testing with $path as the active path"
+	    disable_path "$device" "$path"
+	    sleep "$CYCLE_DELAY"
+	    enable_path "$device" "$path"
+	    break
+	done
 
-            # Disable all other paths
-            for other_path in "${paths[@]}"; do
-                if [[ "$other_path" != "$path" ]]; then
-                    disable_path "$device" "$other_path"
-                    log_info "Waiting $CYCLE_DELAY seconds before next path..."
-                    sleep "$CYCLE_DELAY"
-                fi
-            done
-
-            # Re-enable all other paths
-            for other_path in "${paths[@]}"; do
-                if [[ "$other_path" != "$path" ]]; then
-                    enable_path "$device" "$other_path"
-                    log_info "Waiting $CYCLE_DELAY seconds before next path..."
-                    sleep "$CYCLE_DELAY"
-                fi
-            done
-        done
+#        for path in "${paths[@]}"; do
+#            log_info "Testing with $path as the active path"
+#
+#            # Disable all other paths
+#            for other_path in "${paths[@]}"; do
+#                if [[ "$other_path" != "$path" ]]; then
+#                    disable_path "$device" "$other_path"
+#                    log_info "Waiting $CYCLE_DELAY seconds before next path..."
+#                    sleep "$CYCLE_DELAY"
+#                fi
+#            done
+#
+#            # Re-enable all other paths
+#            for other_path in "${paths[@]}"; do
+#                if [[ "$other_path" != "$path" ]]; then
+#                    enable_path "$device" "$other_path"
+#                    log_info "Waiting $CYCLE_DELAY seconds before next path..."
+#                    sleep "$CYCLE_DELAY"
+#                fi
+#            done
+#        done
 
         log_success "Completed cycle $cycle"
         ((cycle++))
+	log_info "Waiting $CYCLE_DELAY seconds before next cycle..."
+	sleep "$CYCLE_DELAY"
     done
 }
 
